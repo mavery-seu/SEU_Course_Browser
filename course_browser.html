@@ -66,6 +66,18 @@
     margin-bottom: 10px;
   }
 
+  .tbd-note {
+    text-align: center;
+    color: #b91c1c;
+    background: #fef2f2;
+    border: 1px solid #fecaca;
+    border-radius: 10px;
+    padding: 10px 12px;
+    margin: 0 auto 12px;
+    max-width: 760px;
+    font-size: 14px;
+  }
+
   .view-toggle {
     display: flex;
     justify-content: center;
@@ -213,6 +225,13 @@
 
   .calendar-event:hover {
     z-index: 50;
+  }
+
+  .calendar-event-title,
+  .calendar-event-sub {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .calendar-event-title {
@@ -492,11 +511,38 @@
     margin: 0;
   }
 
+  .day-calendar-controls {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+  }
+
+  .day-calendar-controls button {
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    background: white;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 14px;
+  }
+
+  .day-calendar-title {
+    font-weight: 700;
+    min-width: 120px;
+    text-align: center;
+  }
+
 </style>
 </head>
 <body>
   <div class="card">
     <h2>Fall 2026 Course Browser</h2>
+    <div style="text-align:center; color:red; margin-top:-6px; margin-bottom:12px;">
+      data last scraped on March. 17, 2026
+    </div>
 
     <div class="toolbar">
       <input id="globalSearch" placeholder="Global search across all fields...">
@@ -504,10 +550,14 @@
     </div>
 
     <div class="results-count" id="resultsCount"></div>
+    <div id="tbdSearchNote" class="tbd-note" style="display:none;"></div>
 
     <div class="view-toggle">
       <button id="tableViewBtn" class="active" type="button">Table View</button>
       <button id="calendarViewBtn" type="button">Calendar View</button>
+      <button id="dayCalendarViewBtn" type="button">Day-by-Day Calendar</button>
+      <button id="downloadCalendarBtn" type="button" style="display:none;">Download Calendar JPG</button>
+      <button id="downloadCsvBtn" type="button">Download Matching Rows CSV</button>
     </div>
 
     <div id="tableContainer" class="table-wrap">
@@ -517,16 +567,25 @@
     <div id="calendarContainer" class="calendar-wrap" style="display:none;">
       <div id="calendarView"></div>
     </div>
+
+    <div id="dayCalendarContainer" class="calendar-wrap" style="display:none;">
+      <div id="dayCalendarView"></div>
+    </div>
   </div>
+
+<script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
 
 <script>
 let data = [];
 let headers = [];
 let selectedAttributes = [];
+let selectedSubjects = [];
 let sortCol = null;
 let sortAsc = true;
 let selectedRowKey = null;
 let currentView = "table";
+let currentFilteredRows = [];
+let currentDayCalendarIndex = 0;
 const NON_SORTABLE_COLUMNS = new Set(["Room",  "CRN"]);
 
 function parseCSVLine(line) {
@@ -562,8 +621,22 @@ function toTitleCase(str) {
   return str
     .toLowerCase()
     .split(/\s+/)
-    .map(word => word ? word.charAt(0).toUpperCase() + word.slice(1) : "")
+    .map(word => {
+      if (!word) return "";
+      // keep 2-letter words uppercase (e.g., CS, AI)
+      if (word.length === 2) return word.toUpperCase();
+      return word.charAt(0).toUpperCase() + word.slice(1);
+    })
     .join(" ");
+}
+
+function isTbdSearch(value) {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[.\-_\/]+/g, " ")
+    .replace(/\s+/g, " ");
+  return normalized === "tbd" || normalized === "t b d" || normalized === "to be determined";
 }
 
 function expandDays(value) {
@@ -643,7 +716,9 @@ function transformRow(row) {
   const transformed = { ...row };
 
   if ("Course Name" in transformed) {
-    transformed["Course Name"] = toTitleCase(transformed["Course Name"]);
+    let name = transformed["Course Name"] || "";
+    name = name.replace(/&amp;/g, "&");
+    transformed["Course Name"] = toTitleCase(name);
   }
   if ("Instructor" in transformed) {
     transformed["Instructor"] = (transformed["Instructor"] || "").trim() || "[TBD]";
@@ -659,6 +734,12 @@ function transformRow(row) {
   if ("Attribute" in transformed) {
     const formattedAttribute = formatAttributes(transformed["Attribute"]);
     transformed["Attribute"] = formattedAttribute || "---";
+  }
+  if ("Room" in transformed) {
+    const room = String(transformed["Room"] || "").trim().toLowerCase().replace(/\s+/g, " ");
+    if (!room || room === "none none" || room === "none") {
+      transformed["Room"] = "---";
+    }
   }
 
   return transformed;
@@ -813,34 +894,138 @@ function buildFilters() {
       return;
     }
 
+    if (h === "Subject") {
+      const wrap = document.createElement("div");
+      wrap.className = "multi-select-wrap";
+      wrap.dataset.field = h;
+
+      const box = document.createElement("div");
+      box.className = "multi-select-box";
+      box.tabIndex = 0;
+
+      const input = document.createElement("input");
+      input.placeholder = "Major";
+      input.dataset.field = h;
+      input.id = "subjectMultiInput";
+
+      const menu = document.createElement("div");
+      menu.className = "multi-select-menu";
+      menu.id = "subjectMultiMenu";
+
+      const values = [...new Set(data.map(d => d[h]).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+
+      function renderSubjectMenu(filterText = "") {
+        menu.innerHTML = "";
+        const lower = filterText.toLowerCase();
+
+        const matches = values.filter(v =>
+          !selectedSubjects.includes(v) &&
+          v.toLowerCase().includes(lower)
+        );
+
+        if (!matches.length) {
+          const empty = document.createElement("div");
+          empty.className = "multi-select-option";
+          empty.textContent = "No matching majors";
+          empty.style.cursor = "default";
+          menu.appendChild(empty);
+          return;
+        }
+
+        matches.forEach(v => {
+          const option = document.createElement("div");
+          option.className = "multi-select-option";
+          option.textContent = v;
+          option.onclick = () => {
+            selectedSubjects.push(v);
+            selectedSubjects = [...new Set(selectedSubjects)].sort((a, b) => a.localeCompare(b));
+            renderSubjectChips();
+            renderSubjectMenu(input.value);
+            input.value = "";
+            render();
+            input.focus();
+          };
+          menu.appendChild(option);
+        });
+      }
+
+      function renderSubjectChips() {
+        box.innerHTML = "";
+
+        if (!selectedSubjects.length && !input.value) {
+          const placeholder = document.createElement("span");
+          placeholder.className = "multi-select-placeholder";
+          placeholder.textContent = "Major";
+          box.appendChild(placeholder);
+        }
+
+        selectedSubjects.forEach(v => {
+          const chip = document.createElement("span");
+          chip.className = "multi-select-chip";
+          chip.innerHTML = `<span>${v}</span><button type="button" aria-label="Remove ${v}">×</button>`;
+          chip.querySelector("button").onclick = (e) => {
+            e.stopPropagation();
+            selectedSubjects = selectedSubjects.filter(item => item !== v);
+            renderSubjectChips();
+            renderSubjectMenu(input.value);
+            render();
+          };
+          box.appendChild(chip);
+        });
+
+        box.appendChild(input);
+      }
+
+      box.addEventListener("click", () => {
+        menu.classList.add("open");
+        input.focus();
+      });
+
+      input.addEventListener("focus", () => {
+        menu.classList.add("open");
+        renderSubjectMenu(input.value);
+      });
+
+      input.addEventListener("input", () => {
+        renderSubjectChips();
+        renderSubjectMenu(input.value);
+      });
+
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Backspace" && !input.value && selectedSubjects.length) {
+          selectedSubjects.pop();
+          renderSubjectChips();
+          renderSubjectMenu("");
+          render();
+        }
+      });
+
+      document.addEventListener("click", (e) => {
+        if (!wrap.contains(e.target)) {
+          menu.classList.remove("open");
+        }
+      });
+
+      renderSubjectChips();
+      renderSubjectMenu("");
+
+      wrap.appendChild(box);
+      wrap.appendChild(menu);
+      container.appendChild(wrap);
+      return;
+    }
+
     const input = document.createElement("input");
     input.placeholder = h;
     input.oninput = render;
     input.dataset.field = h;
-
-    if (h === "Subject") {
-      const listId = h + "-list";
-      input.setAttribute("list", listId);
-
-      const datalist = document.createElement("datalist");
-      datalist.id = listId;
-
-      const values = new Set(data.map(d => d[h]).filter(Boolean));
-      [...values].sort((a, b) => a.localeCompare(b)).forEach(v => {
-        const option = document.createElement("option");
-        option.value = v;
-        datalist.appendChild(option);
-      });
-
-      container.appendChild(datalist);
-    }
 
     container.appendChild(input);
   });
 }
 
 function getFilters() {
-  const inputs = document.querySelectorAll('#filters input[data-field]:not(#attributeMultiInput)');
+  const inputs = document.querySelectorAll('#filters input[data-field]:not(#attributeMultiInput):not(#subjectMultiInput)');
   const filters = {};
 
   inputs.forEach(i => {
@@ -849,6 +1034,46 @@ function getFilters() {
   });
 
   return filters;
+}
+
+function stripHtml(value) {
+  const div = document.createElement("div");
+  div.innerHTML = value || "";
+  return div.textContent || div.innerText || "";
+}
+
+function csvEscape(value) {
+  const str = String(value ?? "");
+  return `"${str.replace(/"/g, '""')}"`;
+}
+
+function downloadMatchingRowsCsv(rows, filename = "matching_rows") {
+  const csvHeaders = headers;
+  const lines = [];
+
+  lines.push(csvHeaders.map(csvEscape).join(","));
+
+  rows.forEach(row => {
+    const values = csvHeaders.map(header => {
+      let value = row[header] || "";
+      if (header === "Attribute") {
+        value = stripHtml(value).replace(/\s+/g, " ").trim();
+      }
+      return csvEscape(value);
+    });
+    lines.push(values.join(","));
+  });
+
+  const csvContent = lines.join("\r\n");
+  const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename + ".csv";
+  link.click();
+
+  URL.revokeObjectURL(url);
 }
 
 function render() {
@@ -860,6 +1085,12 @@ function render() {
       if (!(row[key] || "").toLowerCase().includes(filters[key])) {
         return false;
       }
+    }
+
+    if (selectedSubjects.length) {
+      const subjectValue = String(row["Subject"] || "");
+      const hasSelectedSubject = selectedSubjects.includes(subjectValue);
+      if (!hasSelectedSubject) return false;
     }
 
     if (selectedAttributes.length) {
@@ -886,20 +1117,53 @@ function render() {
     });
   }
 
+  currentFilteredRows = filtered;
   document.getElementById("resultsCount").textContent = `${filtered.length} matching row${filtered.length === 1 ? "" : "s"}`;
+
+  const tbdNoteEl = document.getElementById("tbdSearchNote");
+  const isTbd = isTbdSearch(filters["Instructor"]);
+  if (isTbd) {
+    tbdNoteEl.style.display = "";
+    tbdNoteEl.textContent = "Heads up: sorting by that criteria is not useful ✨";
+  } else {
+    tbdNoteEl.style.display = "none";
+    tbdNoteEl.textContent = "";
+  }
+
+  if (isTbd) {
+    document.getElementById("tableContainer").style.display = "none";
+    document.getElementById("calendarContainer").style.display = "none";
+    document.getElementById("dayCalendarContainer").style.display = "none";
+    return;
+  }
 
   if (currentView === "table") {
     document.getElementById("tableContainer").style.display = "";
     document.getElementById("calendarContainer").style.display = "none";
+    document.getElementById("dayCalendarContainer").style.display = "none";
     document.getElementById("tableViewBtn").classList.add("active");
     document.getElementById("calendarViewBtn").classList.remove("active");
+    document.getElementById("dayCalendarViewBtn").classList.remove("active");
+    document.getElementById("downloadCalendarBtn").style.display = "none";
     drawTable(filtered);
-  } else {
+  } else if (currentView === "calendar") {
     document.getElementById("tableContainer").style.display = "none";
     document.getElementById("calendarContainer").style.display = "";
+    document.getElementById("dayCalendarContainer").style.display = "none";
     document.getElementById("tableViewBtn").classList.remove("active");
     document.getElementById("calendarViewBtn").classList.add("active");
+    document.getElementById("dayCalendarViewBtn").classList.remove("active");
+    document.getElementById("downloadCalendarBtn").style.display = "";
     drawCalendar(filtered);
+  } else if (currentView === "dayCalendar") {
+    document.getElementById("tableContainer").style.display = "none";
+    document.getElementById("calendarContainer").style.display = "none";
+    document.getElementById("dayCalendarContainer").style.display = "";
+    document.getElementById("tableViewBtn").classList.remove("active");
+    document.getElementById("calendarViewBtn").classList.remove("active");
+    document.getElementById("dayCalendarViewBtn").classList.add("active");
+    document.getElementById("downloadCalendarBtn").style.display = "";
+    drawDayCalendar(filtered);
   }
 }
 
@@ -1215,6 +1479,157 @@ function drawCalendar(rows) {
   container.innerHTML = calHtml;
 }
 
+function drawSingleDayCalendar(rows, dayKey, dayLabel) {
+  const dayEvents = { [dayKey]: [] };
+
+  rows.forEach(row => {
+    const days = parseDaysCompact(row["Days"]);
+    const timeRange = parseTimeRange(row["Class Time"]);
+    if (!days.length || !timeRange) return;
+
+    if (days.includes(dayKey)) {
+      dayEvents[dayKey].push({
+        row,
+        start: timeRange.start,
+        end: timeRange.end
+      });
+    }
+  });
+
+  const allEvents = Object.values(dayEvents).flat();
+  if (!allEvents.length) {
+    return '<div class="calendar-empty-note">No currently filtered classes meet on this day.</div>';
+  }
+
+  const minStart = Math.min(...allEvents.map(e => e.start));
+  const maxEnd = Math.max(...allEvents.map(e => e.end));
+  const calendarStart = Math.max(420, Math.floor(minStart / 60) * 60);
+  const calendarEnd = Math.min(1320, Math.ceil(maxEnd / 60) * 60);
+  const pxPerMinute = 1.2;
+  const bodyHeight = Math.max(600, (calendarEnd - calendarStart) * pxPerMinute);
+
+  layoutEvents(dayEvents[dayKey]);
+
+  let calHtml = `<div class="calendar-board" style="min-width:0; grid-template-columns: 80px 1fr; grid-template-rows: 44px ${bodyHeight}px;">`;
+  calHtml += `<div class="calendar-corner"></div>`;
+  calHtml += `<div class="calendar-day-header" style="grid-column:2; grid-row:1;">${dayLabel}</div>`;
+
+  calHtml += `<div class="calendar-time-column" style="height:${bodyHeight}px;">`;
+  for (let t = calendarStart; t <= calendarEnd; t += 60) {
+    const top = (t - calendarStart) * pxPerMinute;
+    calHtml += `<div class="calendar-hour-line" style="top:${top}px;"></div>`;
+    calHtml += `<div class="calendar-time-label" style="top:${top}px;">${escapeHtml(minutesToLabel(t))}</div>`;
+    if (t < calendarEnd) {
+      calHtml += `<div class="calendar-half-line" style="top:${top + 30 * pxPerMinute}px;"></div>`;
+    }
+  }
+  calHtml += `</div>`;
+
+  calHtml += `<div class="calendar-days" style="grid-column:2; height:${bodyHeight}px; grid-template-columns: 1fr;">`;
+  calHtml += `<div class="calendar-day-column" style="height:${bodyHeight}px;">`;
+
+  for (let t = calendarStart; t <= calendarEnd; t += 60) {
+    const top = (t - calendarStart) * pxPerMinute;
+    calHtml += `<div class="calendar-hour-line" style="top:${top}px;"></div>`;
+    if (t < calendarEnd) {
+      calHtml += `<div class="calendar-half-line" style="top:${top + 30 * pxPerMinute}px;"></div>`;
+    }
+  }
+
+  dayEvents[dayKey].forEach(event => {
+    const top = (event.start - calendarStart) * pxPerMinute + 2;
+    const height = Math.max(24, (event.end - event.start) * pxPerMinute - 4);
+    const widthPct = 100 / event.colCount;
+    const leftPct = event.col * widthPct;
+    const colors = eventColors(event.row, rows);
+
+    calHtml += `
+      <div class="calendar-event"
+           style="top:${top}px;height:${height}px;left:calc(${leftPct}% + 2px);width:calc(${widthPct}% - 4px);background:${colors.bg};border-left-color:${colors.border};">
+        <div class="calendar-event-title">${escapeHtml(event.row["Course Name"] || "")}</div>
+        <div class="calendar-event-sub">${escapeHtml(event.row["Instructor"] || "")}</div>
+        <div class="calendar-event-sub">${escapeHtml(event.row["Class Time"] || "")}</div>
+
+        <div class="calendar-event-tooltip">
+          <div class="tooltip-title">${escapeHtml(event.row["Course Name"] || "")}</div>
+          <div class="tooltip-grid">
+            <div class="tooltip-label">Professor</div>
+            <div class="tooltip-value">${escapeHtml(event.row["Instructor"] || "")}</div>
+
+            <div class="tooltip-label">Days</div>
+            <div class="tooltip-value">${escapeHtml(event.row["Days"] || "")}</div>
+
+            <div class="tooltip-label">Time</div>
+            <div class="tooltip-value">${escapeHtml(event.row["Class Time"] || "")}</div>
+
+            <div class="tooltip-label">Course</div>
+            <div class="tooltip-value">${escapeHtml(event.row["Subject"] || "")} ${escapeHtml(event.row["Course Number"] || "")}</div>
+
+            <div class="tooltip-label">Section</div>
+            <div class="tooltip-value">${escapeHtml(event.row["Section"] || "")}</div>
+
+            <div class="tooltip-label">Room</div>
+            <div class="tooltip-value">${escapeHtml(event.row["Room"] || "")}</div>
+
+            <div class="tooltip-label">Attribute</div>
+            <div class="tooltip-value">${escapeHtml(event.row["Attribute"] || "")}</div>
+
+            <div class="tooltip-label">CRN</div>
+            <div class="tooltip-value">${escapeHtml(event.row["CRN"] || "")}</div>
+          </div>
+        </div>
+      </div>
+    `;
+  });
+
+  calHtml += `</div></div></div>`;
+  return calHtml;
+}
+
+function drawDayCalendar(rows) {
+  const container = document.getElementById("dayCalendarView");
+  const weekdays = [
+    { key: "M", label: "Monday" },
+    { key: "T", label: "Tuesday" },
+    { key: "W", label: "Wednesday" },
+    { key: "TH", label: "Thursday" },
+    { key: "F", label: "Friday" }
+  ];
+
+  const availableDays = weekdays.filter(day =>
+    rows.some(row => parseDaysCompact(row["Days"]).includes(day.key) && parseTimeRange(row["Class Time"]))
+  );
+
+  if (!availableDays.length) {
+    container.innerHTML = '<div class="calendar-empty-note">No currently filtered classes have both days and times to place on the calendar.</div>';
+    return;
+  }
+
+  if (currentDayCalendarIndex >= availableDays.length) currentDayCalendarIndex = 0;
+  if (currentDayCalendarIndex < 0) currentDayCalendarIndex = availableDays.length - 1;
+
+  const currentDay = availableDays[currentDayCalendarIndex];
+
+  container.innerHTML = `
+    <div class="day-calendar-controls">
+      <button id="prevDayBtn" type="button">← Previous</button>
+      <div class="day-calendar-title">${currentDay.label}</div>
+      <button id="nextDayBtn" type="button">Next →</button>
+    </div>
+    ${drawSingleDayCalendar(rows, currentDay.key, currentDay.label)}
+  `;
+
+  document.getElementById("prevDayBtn").onclick = () => {
+    currentDayCalendarIndex = (currentDayCalendarIndex - 1 + availableDays.length) % availableDays.length;
+    drawDayCalendar(currentFilteredRows);
+  };
+
+  document.getElementById("nextDayBtn").onclick = () => {
+    currentDayCalendarIndex = (currentDayCalendarIndex + 1) % availableDays.length;
+    drawDayCalendar(currentFilteredRows);
+  };
+}
+
 function drawTable(rows) {
   const table = document.getElementById("table");
   table.innerHTML = "";
@@ -1307,6 +1722,139 @@ document.getElementById("calendarViewBtn").onclick = () => {
   currentView = "calendar";
   render();
 };
+document.getElementById("dayCalendarViewBtn").onclick = () => {
+  currentView = "dayCalendar";
+  currentDayCalendarIndex = 0;
+  render();
+};
+document.getElementById("downloadCalendarBtn").onclick = async () => {
+  const calendarEl = document.querySelector(
+    currentView === "dayCalendar"
+      ? "#dayCalendarView .calendar-board"
+      : "#calendarView .calendar-board"
+  );
+  if (!calendarEl) {
+    alert("There is no calendar to download right now.");
+    return;
+  }
+
+  const global = document.getElementById("globalSearch").value.trim();
+  const filters = getFilters();
+
+  let titleParts = [];
+
+  if (selectedSubjects.length) {
+    titleParts.push(selectedSubjects.join(", "));
+  }
+
+  if (selectedAttributes.length) {
+    titleParts.push(selectedAttributes.join(", "));
+  }
+
+  Object.entries(filters).forEach(([key, value]) => {
+    if (value) {
+      titleParts.push(`${key}: ${value}`);
+    }
+  });
+
+  if (global) {
+    titleParts.push(global);
+  }
+
+  let titleText = titleParts.length ? titleParts.join(" • ") : "All Courses";
+  if (currentView === "dayCalendar") {
+    const dayTitleEl = document.querySelector("#dayCalendarView .day-calendar-title");
+    const dayTitle = dayTitleEl ? dayTitleEl.textContent.trim() : "";
+    if (dayTitle) titleText = `${titleText} • ${dayTitle}`;
+  }
+
+  const wrapper = document.createElement("div");
+  wrapper.style.position = "fixed";
+  wrapper.style.left = "-10000px";
+  wrapper.style.top = "0";
+  wrapper.style.background = "#ffffff";
+  wrapper.style.padding = "16px";
+  wrapper.style.width = calendarEl.scrollWidth + 32 + "px";
+  wrapper.style.zIndex = "-1";
+
+  const title = document.createElement("div");
+  title.style.fontSize = "20px";
+  title.style.fontWeight = "700";
+  title.style.textAlign = "center";
+  title.style.marginBottom = "12px";
+  title.style.color = "#1f2937";
+  title.textContent = titleText;
+
+  const calendarClone = calendarEl.cloneNode(true);
+  calendarClone.style.margin = "0 auto";
+
+  wrapper.appendChild(title);
+  wrapper.appendChild(calendarClone);
+  document.body.appendChild(wrapper);
+
+  try {
+    const canvas = await html2canvas(wrapper, {
+      backgroundColor: "#ffffff",
+      scale: 2,
+      useCORS: true,
+      logging: false
+    });
+
+    let filename = titleText
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "_")
+      .replace(/^_|_$/g, "");
+
+    if (!filename) filename = currentView === "dayCalendar" ? "day_calendar" : "calendar";
+
+    const link = document.createElement("a");
+    link.download = filename + ".jpg";
+    link.href = canvas.toDataURL("image/jpeg", 0.95);
+    link.click();
+  } catch (error) {
+    console.error(error);
+    alert("Unable to download calendar snapshot: " + (error && error.message ? error.message : "unknown error"));
+  } finally {
+    wrapper.remove();
+  }
+};
+
+document.getElementById("downloadCsvBtn").onclick = () => {
+  const global = document.getElementById("globalSearch").value.trim();
+  const filters = getFilters();
+
+  let titleParts = [];
+
+  if (selectedSubjects.length) {
+    titleParts.push(selectedSubjects.join(", "));
+  }
+
+  if (selectedAttributes.length) {
+    titleParts.push(selectedAttributes.join(", "));
+  }
+
+  Object.entries(filters).forEach(([key, value]) => {
+    if (value) {
+      titleParts.push(`${key}: ${value}`);
+    }
+  });
+
+  if (global) {
+    titleParts.push(global);
+  }
+
+  let titleText = titleParts.length ? titleParts.join(" • ") : "all_courses";
+
+  let filename = titleText
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_|_$/g, "");
+
+  if (!filename) filename = "all_courses";
+
+  downloadMatchingRowsCsv(currentFilteredRows, filename);
+};
+
 loadCSV();
 </script>
 </body>
