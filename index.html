@@ -503,8 +503,8 @@
   .attribute-list {
     margin: 0;
     padding-left: 18px;
-    display: inline-block;
-    text-align: left;
+    display: block;
+text-align: left;
   }
 
   .attribute-list li {
@@ -534,6 +534,14 @@
     min-width: 120px;
     text-align: center;
   }
+
+
+  th.attributes, td.attributes { text-align: left; vertical-align: top; }
+  td.attributes ul { margin: 0; padding-left: 18px; }
+
+
+  td:last-child { text-align: left; vertical-align: top; }
+  td:last-child ul { margin: 0; padding-left: 18px; }
 
 </style>
 </head>
@@ -698,17 +706,17 @@ function formatSingleTime(value) {
   return `${hour}:${minute} ${suffix}`;
 }
 
-function formatAttributes(value) {
-  if (!value) return "";
-  const items = String(value)
-    .split(/[;,|]/)
+function parseAttributeItems(value) {
+  if (!value) return [];
+  return String(value)
+    .split(/[,;|]/)
     .map(item => toTitleCase(item.trim()))
     .filter(Boolean);
+}
 
+function formatAttributes(value) {
+  const items = parseAttributeItems(value);
   if (!items.length) return "";
-
-  if (items.length === 1) return items[0];
-
   return `<ul class="attribute-list">${items.map(item => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`;
 }
 
@@ -732,6 +740,9 @@ function transformRow(row) {
     transformed["Class Time"] = formattedTime || "---";
   }
   if ("Attribute" in transformed) {
+    const attributeItems = parseAttributeItems(transformed["Attribute"]);
+    transformed["__attributeItems"] = attributeItems;
+    transformed["__attributeText"] = attributeItems.join(", ");
     const formattedAttribute = formatAttributes(transformed["Attribute"]);
     transformed["Attribute"] = formattedAttribute || "---";
   }
@@ -791,7 +802,7 @@ function buildFilters() {
       menu.className = "multi-select-menu";
       menu.id = "attributeMultiMenu";
 
-      const values = [...new Set(data.map(d => d[h]).filter(v => v && v !== "---"))].sort((a, b) => a.localeCompare(b));
+      const values = [...new Set(data.flatMap(d => d.__attributeItems || []))].sort((a, b) => a.localeCompare(b));
 
       function renderAttributeMenu(filterText = "") {
         menu.innerHTML = "";
@@ -1056,7 +1067,7 @@ function downloadMatchingRowsCsv(rows, filename = "matching_rows") {
     const values = csvHeaders.map(header => {
       let value = row[header] || "";
       if (header === "Attribute") {
-        value = stripHtml(value).replace(/\s+/g, " ").trim();
+        value = row["__attributeText"] || "";
       }
       return csvEscape(value);
     });
@@ -1093,9 +1104,9 @@ function render() {
     }
 
     if (selectedAttributes.length) {
-      const attrValue = String(row["Attribute"] || "").toLowerCase();
+      const attrItems = (row["__attributeItems"] || []).map(item => String(item).toLowerCase());
       const hasAllSelected = selectedAttributes.every(attr =>
-        attrValue.includes(String(attr).toLowerCase())
+        attrItems.includes(String(attr).toLowerCase())
       );
       if (!hasAllSelected) return false;
     }
@@ -1464,7 +1475,7 @@ function drawCalendar(rows) {
               <div class="tooltip-value">${escapeHtml(event.row["Room"] || "")}</div>
 
               <div class="tooltip-label">Attribute</div>
-              <div class="tooltip-value">${escapeHtml(event.row["Attribute"] || "")}</div>
+              <div class="tooltip-value">${escapeHtml(event.row["__attributeText"] || "---")}</div>
 
               <div class="tooltip-label">CRN</div>
               <div class="tooltip-value">${escapeHtml(event.row["CRN"] || "")}</div>
@@ -1574,7 +1585,7 @@ function drawSingleDayCalendar(rows, dayKey, dayLabel) {
             <div class="tooltip-value">${escapeHtml(event.row["Room"] || "")}</div>
 
             <div class="tooltip-label">Attribute</div>
-            <div class="tooltip-value">${escapeHtml(event.row["Attribute"] || "")}</div>
+            <div class="tooltip-value">${escapeHtml(event.row["__attributeText"] || "---")}</div>
 
             <div class="tooltip-label">CRN</div>
             <div class="tooltip-value">${escapeHtml(event.row["CRN"] || "")}</div>
@@ -1641,6 +1652,7 @@ function drawTable(rows) {
 
   headers.forEach(h => {
     const th = document.createElement("th");
+    if (h === "Attribute") th.classList.add("attributes");
     const isSortable = !NON_SORTABLE_COLUMNS.has(h);
 
     const wrapper = document.createElement("span");
@@ -1698,6 +1710,7 @@ function drawTable(rows) {
 
     headers.forEach(h => {
       const td = document.createElement("td");
+      if (h === "Attribute") td.classList.add("attributes");
       if (h === "Attribute" && String(r[h] || "").includes("<ul")) {
         td.innerHTML = r[h] || "";
       } else if (h === "Course Number") {
